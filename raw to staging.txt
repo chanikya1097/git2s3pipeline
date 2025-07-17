@@ -1,0 +1,39 @@
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.sql.functions import col, when, lit
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Load from raw catalog
+df = glueContext.create_dynamic_frame.from_catalog(
+    database="financial_data_db",
+    table_name="raw_my_etl_raw_bucket1",  # Replace with your raw table name
+    transformation_ctx="df"
+).toDF()
+
+# Fill missing values
+df_filled = df.withColumn("Revenue", when((col("Revenue").isin('', 'NaN')) | col("Revenue").isNull(), lit(0.0)).otherwise(col("Revenue"))) \
+              .withColumn("Expenses", when((col("Expenses").isin('', 'NaN')) | col("Expenses").isNull(), lit(0.0)).otherwise(col("Expenses"))) \
+              .withColumn("Profit", when((col("Profit").isin('', 'NaN')) | col("Profit").isNull(), lit(0.0)).otherwise(col("Profit"))) \
+              .withColumn("Profit Margin", when((col("Profit Margin").isin('', 'NaN')) | col("Profit Margin").isNull(), lit(0.0)).otherwise(col("Profit Margin"))) \
+              .withColumn("Notes", when(col("Notes").isNull() | (col("Notes") == ''), lit("Unknown")).otherwise(col("Notes"))) \
+              .withColumn("Approval Status", when(col("Approval Status").isNull() | (col("Approval Status") == ''), lit("Pending")).otherwise(col("Approval Status")))
+
+# Cast numeric types
+df_clean = df_filled.withColumn("Revenue", col("Revenue").cast("double")) \
+                    .withColumn("Expenses", col("Expenses").cast("double")) \
+                    .withColumn("Profit", col("Profit").cast("double")) \
+                    .withColumn("Profit Margin", col("Profit Margin").cast("double"))
+
+# Write to staging bucket
+df_clean.write.mode("overwrite").option("header", True).csv("s3://my-etl-staging-bucket1/financial-data-staging/")
+
+job.commit()

@@ -1,0 +1,49 @@
+import sys
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.sql.functions import col, when, lit, trim, upper, initcap, round as spark_round
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Load from staging catalog
+df = glueContext.create_dynamic_frame.from_catalog(
+    database="financial_data_db",
+    table_name="financial_data_staging",  # Replace with your actual staging table
+    transformation_ctx="df"
+).toDF()
+
+# Clean text columns
+df = df.withColumn("Company", initcap(trim(col("Company")))) \
+       .withColumn("Region", initcap(trim(col("Region")))) \
+       .withColumn("Currency", upper(trim(col("Currency"))))
+
+df = df.withColumn("Profit Margin", when(col("Profit Margin") > 1.0, 1.0).otherwise(col("Profit Margin")))
+
+# Add Net Worth column
+df = df.withColumn("Net Worth", col("Revenue") - col("Expenses") + col("Profit"))
+
+# Round numeric values
+df = df.withColumn("Revenue", spark_round(col("Revenue"), 2)) \
+       .withColumn("Expenses", spark_round(col("Expenses"), 2)) \
+       .withColumn("Profit", spark_round(col("Profit"), 2)) \
+       .withColumn("Profit Margin", spark_round(col("Profit Margin"), 2)) \
+       .withColumn("Net Worth", spark_round(col("Net Worth"), 2))
+
+# Drop duplicates
+df_cleaned = df.dropDuplicates()
+
+# OPTIONAL: drop unwanted partition column if it exists
+if 'partition_0' in df_cleaned.columns:
+    df_cleaned = df_cleaned.drop("partition_0")
+
+# Write to curated bucket
+df_cleaned.write.mode("overwrite").option("header", True).csv("s3://my-etl-curated-bucket1/curated-output/")
+
+job.commit()
